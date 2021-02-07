@@ -72,7 +72,7 @@ def checksum(p, hash=hashlib.md5):
         if os.path.isdir(p):
             # directory: do a tree hash
             H.update(b".") # ??? this is to make sure the hash of the empty dir != the hash of the empty file
-            for f in os.listdir(p):
+            for f in sorted(os.listdir(p)):
                 path = os.path.join(p,f)
                 if not (os.path.isdir(path) or os.path.isfile(path)): continue # skip non-regular files
                 #if os.path.islink(path): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
