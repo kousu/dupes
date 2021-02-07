@@ -180,6 +180,20 @@ def dupes(*dirs, followlinks=False):
 
     # between each step non-duplicates, which are the vast majority of data in most cases, are forgotten so they don't slow down the next steps.
 
+    # TODO:
+    #  i can probably get a progress bar out of this if i rewrite it so that
+    #  instead of handling itself step by step
+    #  it's a single loop over all the targets
+    #  and they do each step within themselves
+    #  CATCH: I *must* do directories in a separate block *after* everything else
+    #   ...well maybe not. maybe I can do something like... 
+    #   1. make sure to process directories after their contents [x]
+    #   2. in checksum(), *look at the overall table* instead of memoizing locally;
+    #      this allows us to decide  sneak in something that sneak in a preprocessing step
+    #    -> no no no this doesn't work becaaaaaause we don't know if the checksum is needed until we do the entire set of files
+    #   because I need to be able to detect isolated files and fill in random checksums for them.
+    #   because their checksums need tok happen
+
     # pass 0: get the complete set of targets to consider
     import time; t0=time.time()
     partitions = {}
@@ -195,6 +209,15 @@ def dupes(*dirs, followlinks=False):
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 partitions[()].add(p)
     print(f'pass 0: {time.time() - t0:.2f}s')
+
+    # wahhh
+    # okay so the ordering is kind of crazed because:
+    # - with topdown=False, the *first result* is Music/rave, *because* that's an empty folder in the top level folder
+    #   so the thing recurses down into it and produces it *as path/*
+    # - then that becomes the first thing in the set
+    # - then that means the first *bucket* is ('d', '4096', )
+    #   which means *all the folders* end up coming before all the files
+    # ..fuck.
 
     # pass .5: partition by filetype
     import time; t0=time.time()
@@ -257,7 +280,7 @@ def dupes(*dirs, followlinks=False):
         # but that's illegal in python. so instead I use a : continue
         # maybe it would be better to simply write it with indecies?
         subpartitions = []
-        _partition = list(partition)
+        _partition = list(partition) # make a copy so we can edit the original
         for i,p in enumerate(_partition):
             if p not in partition: continue # skip if already decided
             subpartitions.append(set())
