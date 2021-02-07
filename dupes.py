@@ -152,6 +152,12 @@ def dupes(*dirs, followlinks=False):
             _partitions[K + (size,)].add(p)
 
     partitions = _partitions # forget the previous level
+    for partition in partitions.values():
+        if len(partition) == 1:
+            # uhhhh hack?
+            # make up fake, but probably distinct, checksums for the non-dupe files
+            # in order to allow *directory* checksumming to behave itself
+            checksum._cache[list(partition)[0]] = os.urandom(32)
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
 
     # pass 2: partition by checksum
