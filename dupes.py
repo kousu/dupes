@@ -40,14 +40,29 @@
 # That is, cleverly work upwards from the leaves to construct equivalence classes of directories.
 # That should make it easier to handle non-regular-files and it will definitely avoid needing to run `diff -r`.
 
-import os
 import sys
+import os, stat
 import binascii
 import hashlib
 import subprocess
 
 # external requirements:
 from tqdm import tqdm
+
+def filetype(p):
+    """
+    return the filetype of a path:
+
+    - for regular files
+    d for directories
+    l for symlinks
+    b or c for block or character devices
+    p for pipes
+    s for sockets
+
+    etc
+    """
+    return stat.filemode(os.stat(p).st_mode)[0]
 
 def checksum(p, hash=hashlib.md5):
     # TODO: should the checksum include the filesize?
@@ -139,8 +154,10 @@ def dupes(*dirs, followlinks=False):
     # by trading off this way the expensive operations only run a small number of times.
 
     # The steps are:
+    # 1. file type
     # 1. file size
     # 2. checksum (md5, or sha256, or something else, but tbh in this application md5 is *better* because it's faster)
+    #    - some file types don't have checksums. for these, we make something up.
     # 3. diff
 
     # between each step non-duplicates, which are the vast majority of data in most cases, are forgotten so they don't slow down the next steps.
@@ -158,6 +175,17 @@ def dupes(*dirs, followlinks=False):
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 partitions[()].add(p)
+
+    # TODO: filetype
+    _partitions = {}
+    for K,partition in partitions.items():
+        for p in partition:
+            t = filetype(p)
+            _partitions.setdefault(K + (t,), set())
+            _partitions[K + (t,)].add(p)
+
+    partitions = _partitions # forget the previous level
+    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
 
     # pass 1: partition by size
     _partitions = {}
@@ -223,7 +251,7 @@ def dupes(*dirs, followlinks=False):
     partitions = _partitions # forget the previous level
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
 
-    # at this point, each partitions[size, checksum, i] are sets of paths, of 'equivalence classes'
+    # at this point, each partitions[type, size, checksum, i] are sets of paths, of 'equivalence classes'
     # members of those sets are paths with identical content
 
     # invert the dataset: throw away the index we partitioned by
