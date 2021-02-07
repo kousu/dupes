@@ -22,6 +22,24 @@
 # Then try:
 # diff -ru <(fdupes -r . | sort | sed '/^$/d')  <(./dupes.py . | sort |  sed '/^$/d')
 
+
+# This is a tree-hash based implementation. It's a relatively simple extension from what fdupes does:
+# https://github.com/adrianlopezroche/fdupes/blob/master/fdupes.c
+# Basically, it hashes everything, *including folders themselves*, and uses that to sort content into buckets.
+# Then it filters out all the non-duplicates, *and child duplicates*, and prints.
+#
+# There are some problems with the tree-hash:
+# 1. it implies you need checksums computed for all files, even ones you wouldn't otherwise need to checksum
+#    - worked around with a clever hack, but it's definitely a hack
+# 2. the diff(1) step ends up re-diffing subtrees
+# 3. it doesn't handle non-files (i.e. sockets, fifos, block devices, symlinks)
+#    - I hacked in symlink support, but the others are trickier
+#    - fdupes doesn't handle symlinks either it turns out! it completely ignores them!
+#
+# I think it should be possible to replace the tree hash with a dynamic program.
+# That is, cleverly work upwards from the leaves to construct equivalence classes of directories.
+# That should make it easier to handle non-regular-files and it will definitely avoid needing to run `diff -r`.
+
 import os
 import sys
 import binascii
@@ -76,7 +94,7 @@ def checksum(p, hash=hashlib.md5):
             # huh, it was actually faster to do the in-python version
             # 
 
-            print(f"checksumming {p}")
+            #print(f"checksumming {p}") # DEBUG #TODO: logging.info()
 
             BLOCK_SIZE = 65536
             with open(p, 'rb') as f:
@@ -108,10 +126,28 @@ def diff(p1, p2):
     #TODO: fallback to internal diff if diff isn't available
 
 def dupes(*dirs, followlinks=False):
-    
-    # pass 0: collect targets
-    # the reason for a separate pass is to let us give a progress bar
-    targets = []
+    """
+    Print
+
+
+    # TODO: make this return instead of print directly
+    """
+
+    # We have a set of sets -- a set of partitions.
+    # Everything starts out in a single partition and we progressively split it up
+    # each step using a more precise -- and more computationally expensive -- operation.
+    # by trading off this way the expensive operations only run a small number of times.
+
+    # The steps are:
+    # 1. file size
+    # 2. checksum (md5, or sha256, or something else, but tbh in this application md5 is *better* because it's faster)
+    # 3. diff
+
+    # between each step non-duplicates, which are the vast majority of data in most cases, are forgotten so they don't slow down the next steps.
+
+    # pass 0: get the complete set of targets to consider
+    partitions = {}
+    partitions[()] = set() # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
     for dir in dirs:
         # TODO: handle onerror=?
         if not os.path.isdir(dir):
@@ -121,28 +157,7 @@ def dupes(*dirs, followlinks=False):
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
-                targets.append(p)
-
-    # okay here's the big idea:
-    # at first, everything is in a big set S. every single thing.
-    # then we take S, and split it into subgroups according to file size.
-    # then we split each of those                
-    # so e.g.
-    # D = targets
-    # then partition:
-
-    # D[(size)] = [t for t in D if stat(t).st_size == size]
-    # then partition:
-    #
-    # D[size, checksum] = [t for t in D[size] if checksum(t) == checksum]
-    #  ^ **with the key optimization that you SKIP 1-length groups; their checksum can be left unknown**
-    # i should probably drop 1-length groups between each partitioning
-    # then partition by running diff:
-    # D[size, checksum, i] = [ ... something or other ... ]
-
-
-    partitions = {}
-    partitions[()] = set(targets) # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
+                partitions[()].add(p)
 
     # pass 1: partition by size
     _partitions = {}
