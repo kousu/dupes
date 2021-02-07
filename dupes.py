@@ -60,10 +60,10 @@ def checksum(p, hash=hashlib.sha256):
                 # which is easy enough to declare
                 # but then how do you program around that?
 
-                H.update(f.encode('utf-8')+b":"+checksum(path))
+                H.update(os.fsencode(f)+b":"+checksum(path))
         elif os.path.islink(p):
             raise TypeError(f'{p} is a symlink') # :?????
-            b = os.readlink(p).encode('utf-8') #? ???
+            b = os.fsencode(os.readlink(p)) #? ???
             H.update(b)
         elif os.path.isfile(p):
             # file
