@@ -24,12 +24,14 @@
 
 import os
 import sys
+import binascii
 import hashlib
+import subprocess
 
 # external requirements:
 from tqdm import tqdm
 
-def checksum(p, hash=hashlib.sha256):
+def checksum(p, hash=hashlib.md5):
     # TODO: should the checksum include the filesize?
     if p not in checksum._cache:
         # memoize
@@ -69,6 +71,13 @@ def checksum(p, hash=hashlib.sha256):
             # file
 
             # TODO: I wonder if it would be faster to use md5sum(1), sha256sum(1), sha256(1), etc, which are C programs, instead of hashing in python
+            #checksum._cache[p] = binascii.unhexlify(subprocess.check_output(['sha256sum', '-b', p]).split()[0])
+            #return checksum._cache[p]
+            # huh, it was actually faster to do the in-python version
+            # 
+
+            print(f"checksumming {p}")
+
             BLOCK_SIZE = 65536
             with open(p, 'rb') as f:
                 while True:
@@ -82,9 +91,23 @@ def checksum(p, hash=hashlib.sha256):
 checksum._cache = {} # cache of checksums; I know I could use @functools.lru_cache or write my own @memoize but I want to be explicit for now so I can see all the parts
 
 
+def diff(p1, p2):
+    "return True if paths p1 and p2 differ, false otherwise"
+
+    r = subprocess.run(['diff','-r',p1+p1,p2], stdout=subprocess.DEVNULL).returncode
+    if r == 0:
+        return False
+    if r == 1:
+        return True
+    else:
+        # NB: this intentionally doesn't capture stderr; so that actual errors are reported.
+        raise Exception('diff failed')        
+
+    #TODO: fallback to internal diff if diff isn't available
+
 def dupes(*dirs, followlinks=False):
     
-    # first pass: compute list of targets to hash
+    # pass 0: collect targets
     # the reason for a separate pass is to let us give a progress bar
     targets = []
     for dir in dirs:
@@ -98,61 +121,107 @@ def dupes(*dirs, followlinks=False):
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 targets.append(p)
 
-    # second pass: compute checksum of every file and group files by their checksums
-    # note: this relies on topdown=False (above!) + memoization inside of checksum() to ensure checksums are computed bottom-up
-    D = {} # contains sets of duplicates, each such that f in D[checksum(f)] for all f, and each f is *only in one* set
-    for p in tqdm(targets):
-        if checksum(p) not in D:
-            D[checksum(p)] = set()
-        D[checksum(p)].add(p)
-    # uhhh now I need to invert the dataset?
-    # in fact we can throw away the keys here
-    D = {frozenset(S) for S in D.values()}
-    #D = list(D.values())
+    # okay here's the big idea:
+    # at first, everything is in a big set S. every single thing.
+    # then we take S, and split it into subgroups according to file size.
+    # then we split each of those                
+    # so e.g.
+    # D = targets
+    # then partition:
 
-    # filter out non-dupes
-    D = {S for S in D if len(S) > 1}
+    # D[(size)] = [t for t in D if stat(t).st_size == size]
+    # then partition:
+    #
+    # D[size, checksum] = [t for t in D[size] if checksum(t) == checksum]
+    #  ^ **with the key optimization that you SKIP 1-length groups; their checksum can be left unknown**
+    # i should probably drop 1-length groups between each partitioning
+    # then partition by running diff:
+    # D[size, checksum, i] = [ ... something or other ... ]
 
-    # okay now go through the sets in D and confirm the matches by using diff
-    # compare [`int confirmmatch(FILE *file1, FILE *file2)`](https://github.com/adrianlopezroche/fdupes/blob/2209aff509bd15e8641cb9ae3c9bbb8056f7dd7b/fdupes.c#L690)
-    # TODO:
-    # for S in D:
-    # go through the set S and produce multiple sets, one for each equivalence class
-    # Ss = []
-    # what's the best way to do this? uh, compare everything to f, the first 
-    #   for f in S: # <-- this can be made more efficient by only doing the upper triangle
-    #     matches = set()
-    #     for g in S:
-    #       if subprocess.run(['diff','-r',f,g]).returncode == 0: # identical, good
-    #         S.remove(g); matches.add(g)
-    #     Ss.append(matches)
-    # something like that anyway
-    # you could do the same but with S == all files, but it would be slower because you'd be byte-for-byte comparing 
-    # except... in the case where you mostly only have two dupes of everything
 
-    # make an index by path
+    partitions = {}
+    partitions[()] = set(targets) # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
+
+    # pass 1: partition by size
+    _partitions = {}
+    for K,partition in partitions.items():
+        for p in partition:
+            size = os.stat(p).st_size # subtlety: this *does* work on directories, and always returns the same size; at least on linux?
+              # if it didn't, then dirs need to be special-cased here
+            _partitions.setdefault(K + (size,), set())
+            _partitions[K + (size,)].add(p)
+
+    partitions = _partitions # forget the previous level
+    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+
+    # pass 2: partition by checksum
+    _partitions = {}
+    for K,partition in partitions.items():
+        for p in partition:
+            c = checksum(p)
+            _partitions.setdefault(K + (c,), set())
+            _partitions[K + (c,)].add(p)
+
+    partitions = _partitions # forget the previous level
+    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+
+    # pass 3: partition by diff
+    # this could be optional; even md5 is safe against accidental collisions and sha256 certainly is;
+    # it's only if you don't trust your storage that you really need this.
+    """
+    _partitions = {}
+    for K,partition in partitions.items():
+        # we need to.... go over pairs in partition x partition
+        partition = list(partition)
+        subpartitions = []
+        for i,p in enumerate(partition):
+            subpartitions.append({p})
+            partition.remove(p)
+            for j,p2 in enumerate(partition[i+1:]):
+                if not diff(p,p2):
+                    # hmmm will this do redundant work?
+                    subpartitions[-1].add(p2)
+                    partition.remove(p) # ???
+                    # and scratch p and p2 off the list
+        
+        for i,S in enumerate(subpartitions)
+            _partitions.setdefault(K + (i,), set())
+            _partitions[K + (i,)].add(f)
+
+    partitions = _partitions # forget the previous level
+    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    """
+
+    # at this point, each partitions[size, checksum, i] are sets of paths, of 'equivalence classes'
+    # members of those sets are paths with identical content
+
+    # invert the dataset: throw away the index we partitioned by
+    partitions = {frozenset(S) for S in partitions.values()}
+
+    # now: filter out children when their parents are known to be duplicates,
+    # to make the output less overwhelming.
+    # to help, re-index by paths
     I = {}
-    for S in D:
+    for S in partitions:
         for p in S:
             I[p] = S
-
-    # now: filter out children.
-    # to do this efficiently I should reshape the dataset with an index first, probably
-    # should I loop over parents and remove their children or loop over children and remove their parents?
-    #
-    # this is also sort of weird because I'm look at paths but removing entire sets? Is that going to work?
-    #D = {I[p] for p in I if not any(isancestor(P, p) for P in I)} # <__ VERY SLOW
-    # okay maybe for each, we can check if their *immediate* ancestor is in the list
-    # aha, this worked!
+    # then drop children by check if their *immediate* ancestor is a duplicate
     # but is that..right? this works because we walk the trees bottom-up, hashing as we go
-    # what is this saying?
-    # it's saying: if 
-    # TODO: this should be able to be more efficient by considering 
-    D = {I[p] for p in I if not os.path.dirname(p) in I}
+    # this is weird because we're including a complete partition from a single
+    # we have to collapse the redundancies back down with set() here :/
+    # TODO: can this be more efficient by looping over the partitions directly?
+    #       maybe. there should be some invariant here like "if {'p/A', 'q/A'} is a partition, 'p/' is in a partition iff {'p/','q/'} is a partition"
+    #              so that we only need to check a single element in each partition to know what to do
+    partitions = {I[p] for p in I if not os.path.dirname(p) in I}
 
-    #print("dupes:")
-    D = sorted([sorted(S) for S in D]) # ugh; i wonder if it's possible to achieve this just by the order of os.walk()? e.g. store things as lists?
-    for S in D:
+    # sort output
+    # ugh; i wonder if it's possible to achieve this by writing the whole algorithm with lists instead of sets
+    # and by being careful about how I use os.walk()?
+    # sorting after the fact is annoying
+    # it's not especially slow but it's not ideal either
+    partitions = sorted([sorted(S) for S in partitions])
+
+    for S in partitions:
         for f in S:
             if os.path.isdir(f) and not f.endswith("/"): f+="/"
             print(f)
