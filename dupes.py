@@ -26,6 +26,8 @@ import os
 import sys
 import hashlib
 
+# external requirements:
+from tqdm import tqdm
 
 def checksum(p, hash=hashlib.sha256):
     # TODO: should the checksum include the filesize?
@@ -81,10 +83,10 @@ checksum._cache = {} # cache of checksums; I know I could use @functools.lru_cac
 
 
 def dupes(*dirs, followlinks=False):
-
-    # compute checksum of every file and group files by their checksums
-    # note: this uses topdown=False + memoization inside of checksum() to ensure checksums are computed bottom-up
-    D = {} # contains sets of duplicates, each such that f in D[checksum(f)] for all f, and each f is *only in one* set
+    
+    # first pass: compute list of targets to hash
+    # the reason for a separate pass is to let us give a progress bar
+    targets = []
     for dir in dirs:
         # TODO: handle onerror=?
         if not os.path.isdir(dir):
@@ -94,10 +96,15 @@ def dupes(*dirs, followlinks=False):
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
-                if checksum(p) not in D:
-                    D[checksum(p)] = set()
-                D[checksum(p)].add(p)
+                targets.append(p)
 
+    # second pass: compute checksum of every file and group files by their checksums
+    # note: this relies on topdown=False (above!) + memoization inside of checksum() to ensure checksums are computed bottom-up
+    D = {} # contains sets of duplicates, each such that f in D[checksum(f)] for all f, and each f is *only in one* set
+    for p in tqdm(targets):
+        if checksum(p) not in D:
+            D[checksum(p)] = set()
+        D[checksum(p)].add(p)
     # uhhh now I need to invert the dataset?
     # in fact we can throw away the keys here
     D = {frozenset(S) for S in D.values()}
