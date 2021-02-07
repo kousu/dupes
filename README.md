@@ -369,6 +369,8 @@ This doesn't yet:
 - support `-1` for printing everything on a single line
 - support interactive deletion (I'm not sure it should, though; you can pipe to your own scripts if you want that)
 - the progress bars could be more useful
+- this doesn't double-confirm that directories are indeed identical, the way it (and `fdupes`) does for files
+  - there's a performance problem to work through there.
 
 
 ## See Also
