@@ -76,7 +76,7 @@ def checksum(p, hash=hashlib.md5):
             for f in os.listdir(p):
                 path = os.path.join(p,f)
                 if not (os.path.isdir(path) or os.path.isfile(path)): continue # skip non-regular files
-                if os.path.islink(path): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
+                #if os.path.islink(path): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                  # TODO: this bit of code clearly should be overlapping with the code under os.walk()
 
 
@@ -98,7 +98,7 @@ def checksum(p, hash=hashlib.md5):
 
                 H.update(os.fsencode(f)+b":"+checksum(path))
         elif os.path.islink(p):
-            raise TypeError(f'{p} is a symlink') # :?????
+            #raise TypeError(f'{p} is a symlink') # :?????
             b = os.fsencode(os.readlink(p)) #? ???
             H.update(b)
         elif os.path.isfile(p):
@@ -210,7 +210,7 @@ def dupes(*dirs, followlinks=False):
             for p in [os.path.join(path, e) for e in items]:
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
-                if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
+                #if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 files.add(p)
     print(f'pass 0: {time.time() - t0:.2f}s')
 
