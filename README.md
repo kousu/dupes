@@ -17,6 +17,13 @@ or any other amount of mess. `dupes` can help you clean this up by identifying r
 It can also help you ensure that your backups are actually complete copies; though `diff -r` is more useful for that.
 
 
+## Installation
+
+```
+git clone --depth 1 https://github.com/kousu/dupes # I haven't uploaded to pypi yet
+pip install dupes
+```
+
 ## Example
 
 This example is a bit pythonista navel-gazey, but it is easy to set up and demonstrate:
