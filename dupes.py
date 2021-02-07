@@ -42,6 +42,7 @@
 
 import sys
 import os, stat
+from itertools import count
 import binascii
 import hashlib
 import subprocess
@@ -153,10 +154,11 @@ def _internal_diff(p1, p2):
             r2 = fd2.read(CHUNK_SIZE)
             if r1 != r2:
                 return False
+                # uhhh hang on this isn't right
             if not r2: break
         return True
 
-diff = _internal_diff
+#diff = _internal_diff
 
 def dupes(*dirs, followlinks=False):
     """
@@ -203,7 +205,7 @@ def dupes(*dirs, followlinks=False):
         if not os.path.isdir(dir):
             raise ValueError(f'{dir} is not a directory') # XXX??? why doesn't os.walk() error on this?
         for (path, dirs, files) in os.walk(dir, topdown=False, followlinks=followlinks):
-            for p in [os.path.join(path, e) for e in files] + [path]:
+            for p in [os.path.join(path, e) for e in files]:
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
@@ -219,88 +221,70 @@ def dupes(*dirs, followlinks=False):
     #   which means *all the folders* end up coming before all the files
     # ..fuck.
 
-    # pass .5: partition by filetype
-    import time; t0=time.time()
-    _partitions = {}
-    for K,partition in tqdm(partitions.items()):
-        for p in partition:
-            t = filetype(p)
-            _partitions.setdefault(K + (t,), set())
-            _partitions[K + (t,)].add(p)
+    # attempted rewrite to do a single pass over all the files
+    # but this can't be a totally single pass because i have to do the dirs in a second pass
 
-    partitions = _partitions # forget the previous level
-    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
-    print(f'pass .5: {time.time() - t0:.2f}s')
+    # bah
+    # maybe I should keep a second dict just for the deferred checksum
+    # the main dict is always keyed (t,s,c,i), and there's *always* (which we enforce
+    deferred_checksums = {}
+    for p in tqdm(partitions[()]):
+        t = filetype(p)
+        s = os.stat(p).st_size
 
-    import time; t0=time.time()
-    # pass 1: partition by size
-    _partitions = {}
-    for K,partition in tqdm(partitions.items()):
-        for p in partition:
-            size = os.stat(p).st_size # subtlety: this *does* work on directories, and always returns the same size; at least on linux?
-              # if it didn't, then dirs need to be special-cased here
-            _partitions.setdefault(K + (size,), set())
-            _partitions[K + (size,)].add(p)
+        # optimization: defer checksumming until we have at least a second file to compare with
+        #  this saves a huge amount of time by avoiding checksumming all the files we can tell are unique just from their size
+        if (t,s) not in deferred_checksums:
+            # first t,s we've seen, just put it aside for now
+            # then then *skip forward*
+            deferred_checksums[t,s] = p
+            continue
+        elif deferred_checksums[t,s]:
+            # not the first;
+            # unpack the deferred checksum and use it to initialize the bucket
+            q = deferred_checksums[t,s]
+            c = checksum(q)
+            partitions[t,s,c,0] = {q}
+            deferred_checksums[t,s] = None # mark it finished
+        else:
+            # already finished;
+            pass
 
-    partitions = _partitions # forget the previous level
+        c = checksum(p)
+
+        # run diff to confirm the match or not
+        # (this is sort of weird because I'm indexing by integer for the last field of a tuple in a dict;
+        #  it might be more obvious to nest a list instead but then the syntax isn't as nicely symmetrical)
+        for i in count():
+            #print("searching",t,s,c,i)
+            if (t,s,c,i) in partitions:
+                q = next(iter(partitions[t,s,c,i])) # compare against the first entry of each bucket; there's no need to check all of them
+                #print("\t diff",q,p)
+                if not diff(q, p):
+                    #print("ACCEPTING",i)
+                    break
+            else:
+                # no match, we must be a new group
+                break
+
+        # print(t,s,c,i) # DEBUG
+        partitions.setdefault((t,s,c,i), set())
+        partitions[t,s,c,i].add(p)
+
+    del partitions[()]  # forget the ur-partition
     for partition in partitions.values():
         if len(partition) == 1:
             # uhhhh hack?
             # make up fake, but probably distinct, checksums for the non-dupe files
             # in order to allow *directory* checksumming to behave itself
             # even if there is a collision here pass 3 will double-check this work.
-            checksum._cache[list(partition)[0]] = os.urandom(32)
+            f = next(iter(partition))
+            if os.path.isfile(f):
+                checksum._cache[f] = os.urandom(32)
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
-    print(f'pass 1: {time.time() - t0:.2f}s')
 
-    import time; t0=time.time()
-    # pass 2: partition by checksum
-    _partitions = {}
-    for K,partition in tqdm(partitions.items()):
-        for p in partition:
-            c = checksum(p)
-            _partitions.setdefault(K + (c,), set())
-            _partitions[K + (c,)].add(p)
-
-    partitions = _partitions # forget the previous level
-    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
-    print(f'pass 2: {time.time() - t0:.2f}s')
-
-    import time; t0=time.time()
-    # pass 3: partition by diff
-    # this could be optional; even md5 is safe against accidental collisions and sha256 certainly is;
-    # it's only if you don't trust your storage that you really need this.
-    _partitions = {}
-    for K,partition in tqdm(partitions.items()):
-        # this is trickier because we don't have anything to key on
-        # we just have to compare files pairwise and see what's what
-        # we can do a littttle bit better than that though
-
-        # this loop is awkward; I *want* to loop over a set, *shrinking* it as I go
-        # but that's illegal in python. so instead I use a : continue
-        # maybe it would be better to simply write it with indecies?
-        subpartitions = []
-        _partition = list(partition) # make a copy so we can edit the original
-        for i,p in enumerate(_partition):
-            if p not in partition: continue # skip if already decided
-            subpartitions.append(set())
-
-            subpartitions[-1].add(p)
-            partition.remove(p)
-            for j,p2 in enumerate(_partition[i+1:]):
-                if p2 not in partition: continue
-                if not diff(p,p2): # hmmm will this do redundant work? will it re-diff things we've already diffed?
-                    subpartitions[-1].add(p2)
-                    partition.remove(p2) # ???
-                    # and scratch p and p2 off the list
-        assert not partition, "Partition must be empty, but instead was {p}"
-
-        for i,S in enumerate(subpartitions):
-            _partitions[K + (i,)] = S
-
-    partitions = _partitions # forget the previous level
-    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
-    print(f'pass 3: {time.time() - t0:.2f}s')
+    # uhhhhh now I need to repeat a similar process but for directories
+    # directories don't need
 
     # at this point, each partitions[type, size, checksum, i] are sets of paths, of 'equivalence classes'
     # members of those sets are paths with identical content
