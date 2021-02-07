@@ -199,17 +199,19 @@ def dupes(*dirs, followlinks=False):
     # pass 0: get the complete set of targets to consider
     import time; t0=time.time()
     partitions = {}
-    partitions[()] = set() # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
+    files = set() # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
+    folders = set()
     for dir in dirs:
         # TODO: handle onerror=?
         if not os.path.isdir(dir):
             raise ValueError(f'{dir} is not a directory') # XXX??? why doesn't os.walk() error on this?
-        for (path, dirs, files) in os.walk(dir, topdown=False, followlinks=followlinks):
-            for p in [os.path.join(path, e) for e in files]:
+        for (path, dirs, items) in os.walk(dir, topdown=False, followlinks=followlinks):
+            folders.add(path)
+            for p in [os.path.join(path, e) for e in items]:
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
-                partitions[()].add(p)
+                files.add(p)
     print(f'pass 0: {time.time() - t0:.2f}s')
 
     # wahhh
@@ -228,7 +230,7 @@ def dupes(*dirs, followlinks=False):
     # maybe I should keep a second dict just for the deferred checksum
     # the main dict is always keyed (t,s,c,i), and there's *always* (which we enforce
     deferred_checksums = {}
-    for p in tqdm(partitions[()]):
+    for p in tqdm(files, "files"):
         t = filetype(p)
         s = os.stat(p).st_size
 
@@ -243,6 +245,7 @@ def dupes(*dirs, followlinks=False):
             # not the first;
             # unpack the deferred checksum and use it to initialize the bucket
             q = deferred_checksums[t,s]
+
             c = checksum(q)
             partitions[t,s,c,0] = {q}
             deferred_checksums[t,s] = None # mark it finished
@@ -271,29 +274,41 @@ def dupes(*dirs, followlinks=False):
         partitions.setdefault((t,s,c,i), set())
         partitions[t,s,c,i].add(p)
 
-    del partitions[()]  # forget the ur-partition
-    for partition in partitions.values():
-        if len(partition) == 1:
-            # uhhhh hack?
-            # make up fake, but probably distinct, checksums for the non-dupe files
-            # in order to allow *directory* checksumming to behave itself
-            # even if there is a collision here pass 3 will double-check this work.
-            f = next(iter(partition))
-            if os.path.isfile(f):
-                checksum._cache[f] = os.urandom(32)
-    partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    # move the leftovers from deferred_checksum into partitions
+    for K, p in tqdm(deferred_checksums.items(), "singletons"):
+        if p is None: continue # skip it!
+        t, s = K
+        # clever hack:
+        # Rather than checksumming all the leftover singletons (which we already *know* are singletons)
+        # make up fake checksums for them. this is enough to allow *directory* checksumming to behave itself.
+        c = os.urandom(32)
+        assert p not in checksum._cache
+        checksum._cache[p] = c
+        # we know there are no other files with (t,s, ..) in their bucket key
+        # so we can assume we're the first
+        partitions[t, s, c, 0] = {p}
+        deferred_checksums[t,s] = None
 
-    # uhhhhh now I need to repeat a similar process but for directories
-    # directories don't need
+    # pass 2: bucket directories
+    import time; t0=time.time()
+    for p in folders:
+        t = filetype(p)
+        s = os.stat(p).st_size
+        c = checksum(p)
+        i = 0 # ?
+        partitions.setdefault((t,s,c,i), set())
+        partitions[t,s,c,i].add(p)
+    print(f'pass 2: {time.time() - t0:.2f}s')
 
     # at this point, each partitions[type, size, checksum, i] are sets of paths, of 'equivalence classes'
-    # members of those sets are paths with identical content
+    # members of those sets are paths with identical content; and each path can be files or dirs.
 
-    import pprint; pprint.pprint(partitions)
+    # pass 3: filter out singletons
+    partitions = {k: v for k,v in tqdm(partitions.items(), "singletons (again)") if len(v) > 1} # forget non-dupes
 
     # invert the dataset: throw away the index we partitioned by
     import time; t0=time.time()
-    partitions = {frozenset(S) for S in partitions.values()}
+    partitions = {frozenset(S) for S in tqdm(partitions.values(), "partitions")}
     print(f'dropping bucket index: {time.time() - t0:.2f}s')
 
     # now: filter out children when their parents are known to be duplicates,
@@ -301,10 +316,11 @@ def dupes(*dirs, followlinks=False):
     # to help, re-index by paths
     import time; t0=time.time()
     I = {}
-    for S in partitions:
+    for S in tqdm(partitions, "partitions"):
         for p in S:
             I[p] = S
     print(f'reindexing: {time.time() - t0:.2f}s')
+
     # then drop children by check if their *immediate* ancestor is a duplicate
     # but is that..right? this works because we walk the trees bottom-up, hashing as we go
     # this is weird because we're including a complete partition from a single
@@ -312,8 +328,9 @@ def dupes(*dirs, followlinks=False):
     # TODO: can this be more efficient by looping over the partitions directly?
     #       maybe. there should be some invariant here like "if {'p/A', 'q/A'} is a partition, 'p/' is in a partition iff {'p/','q/'} is a partition"
     #              so that we only need to check a single element in each partition to know what to do
+    # XXX this part is so weiiiird! I want a second pair of eyes on it.
     import time; t0=time.time()
-    partitions = {I[p] for p in I if not os.path.dirname(p) in I}
+    partitions = {I[p] for p in tqdm(I, "paths") if not os.path.dirname(p) in I}
     print(f'dropping children: {time.time() - t0:.2f}s')
 
     # sort output
@@ -322,7 +339,7 @@ def dupes(*dirs, followlinks=False):
     # sorting after the fact is annoying
     # it's not especially slow but it's not ideal either
     import time; t0=time.time()
-    partitions = sorted([sorted(S) for S in partitions])
+    partitions = sorted([sorted(S) for S in tqdm(partitions, "sorting")])
     print(f'sorting: {time.time() - t0:.2f}s')
 
     for S in partitions:
@@ -335,5 +352,3 @@ def dupes(*dirs, followlinks=False):
 if __name__ == '__main__':
     dupes(*sys.argv[1:])
     
-
-
