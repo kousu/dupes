@@ -127,7 +127,7 @@ checksum._cache = {} # cache of checksums; I know I could use @functools.lru_cac
 def diff(p1, p2):
     "return True if paths p1 and p2 differ, false otherwise"
 
-    #print(['diff','-r',p1,p2]) # TODO: logging.info()
+    print(['diff','-r',p1,p2]) # TODO: logging.info()
     # ..wait
     r = subprocess.run(['diff','-r',p1,p2], stdout=subprocess.DEVNULL).returncode
     if r == 0:
@@ -163,6 +163,7 @@ def dupes(*dirs, followlinks=False):
     # between each step non-duplicates, which are the vast majority of data in most cases, are forgotten so they don't slow down the next steps.
 
     # pass 0: get the complete set of targets to consider
+    import time; t0=time.time()
     partitions = {}
     partitions[()] = set() # notice: initialized with the null tuple as a key, just to make the recursivey bits below nicer
     for dir in dirs:
@@ -175,10 +176,12 @@ def dupes(*dirs, followlinks=False):
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 partitions[()].add(p)
+    print(f'pass 0: {time.time() - t0:.2f}s')
 
-    # TODO: filetype
+    # pass .5: partition by filetype
+    import time; t0=time.time()
     _partitions = {}
-    for K,partition in partitions.items():
+    for K,partition in tqdm(partitions.items()):
         for p in partition:
             t = filetype(p)
             _partitions.setdefault(K + (t,), set())
@@ -186,10 +189,12 @@ def dupes(*dirs, followlinks=False):
 
     partitions = _partitions # forget the previous level
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    print(f'pass .5: {time.time() - t0:.2f}s')
 
+    import time; t0=time.time()
     # pass 1: partition by size
     _partitions = {}
-    for K,partition in partitions.items():
+    for K,partition in tqdm(partitions.items()):
         for p in partition:
             size = os.stat(p).st_size # subtlety: this *does* work on directories, and always returns the same size; at least on linux?
               # if it didn't, then dirs need to be special-cased here
@@ -205,10 +210,12 @@ def dupes(*dirs, followlinks=False):
             # even if there is a collision here pass 3 will double-check this work.
             checksum._cache[list(partition)[0]] = os.urandom(32)
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    print(f'pass 1: {time.time() - t0:.2f}s')
 
+    import time; t0=time.time()
     # pass 2: partition by checksum
     _partitions = {}
-    for K,partition in partitions.items():
+    for K,partition in tqdm(partitions.items()):
         for p in partition:
             c = checksum(p)
             _partitions.setdefault(K + (c,), set())
@@ -216,12 +223,14 @@ def dupes(*dirs, followlinks=False):
 
     partitions = _partitions # forget the previous level
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    print(f'pass 2: {time.time() - t0:.2f}s')
 
+    import time; t0=time.time()
     # pass 3: partition by diff
     # this could be optional; even md5 is safe against accidental collisions and sha256 certainly is;
     # it's only if you don't trust your storage that you really need this.
     _partitions = {}
-    for K,partition in partitions.items():
+    for K,partition in tqdm(partitions.items()):
         # this is trickier because we don't have anything to key on
         # we just have to compare files pairwise and see what's what
         # we can do a littttle bit better than that though
@@ -250,20 +259,27 @@ def dupes(*dirs, followlinks=False):
 
     partitions = _partitions # forget the previous level
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
+    print(f'pass 3: {time.time() - t0:.2f}s')
 
     # at this point, each partitions[type, size, checksum, i] are sets of paths, of 'equivalence classes'
     # members of those sets are paths with identical content
 
+    import pprint; pprint.pprint(partitions)
+
     # invert the dataset: throw away the index we partitioned by
+    import time; t0=time.time()
     partitions = {frozenset(S) for S in partitions.values()}
+    print(f'dropping bucket index: {time.time() - t0:.2f}s')
 
     # now: filter out children when their parents are known to be duplicates,
     # to make the output less overwhelming.
     # to help, re-index by paths
+    import time; t0=time.time()
     I = {}
     for S in partitions:
         for p in S:
             I[p] = S
+    print(f'reindexing: {time.time() - t0:.2f}s')
     # then drop children by check if their *immediate* ancestor is a duplicate
     # but is that..right? this works because we walk the trees bottom-up, hashing as we go
     # this is weird because we're including a complete partition from a single
@@ -271,14 +287,18 @@ def dupes(*dirs, followlinks=False):
     # TODO: can this be more efficient by looping over the partitions directly?
     #       maybe. there should be some invariant here like "if {'p/A', 'q/A'} is a partition, 'p/' is in a partition iff {'p/','q/'} is a partition"
     #              so that we only need to check a single element in each partition to know what to do
+    import time; t0=time.time()
     partitions = {I[p] for p in I if not os.path.dirname(p) in I}
+    print(f'dropping children: {time.time() - t0:.2f}s')
 
     # sort output
     # ugh; i wonder if it's possible to achieve this by writing the whole algorithm with lists instead of sets
     # and by being careful about how I use os.walk()?
     # sorting after the fact is annoying
     # it's not especially slow but it's not ideal either
+    import time; t0=time.time()
     partitions = sorted([sorted(S) for S in partitions])
+    print(f'sorting: {time.time() - t0:.2f}s')
 
     for S in partitions:
         for f in S:
