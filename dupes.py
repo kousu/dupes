@@ -349,6 +349,14 @@ def dupes(*dirs, followlinks=False):
         print()
 
 
+def main(argv=None):
+
+    if argv is None:
+        argv = sys.argv[1:]
+
+    dupes(*argv)
+
+
 if __name__ == '__main__':
-    dupes(*sys.argv[1:])
+    main()
     
