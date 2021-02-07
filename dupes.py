@@ -94,7 +94,9 @@ checksum._cache = {} # cache of checksums; I know I could use @functools.lru_cac
 def diff(p1, p2):
     "return True if paths p1 and p2 differ, false otherwise"
 
-    r = subprocess.run(['diff','-r',p1+p1,p2], stdout=subprocess.DEVNULL).returncode
+    #print(['diff','-r',p1,p2]) # TODO: logging.info()
+    # ..wait
+    r = subprocess.run(['diff','-r',p1,p2], stdout=subprocess.DEVNULL).returncode
     if r == 0:
         return False
     if r == 1:
@@ -157,6 +159,7 @@ def dupes(*dirs, followlinks=False):
             # uhhhh hack?
             # make up fake, but probably distinct, checksums for the non-dupe files
             # in order to allow *directory* checksumming to behave itself
+            # even if there is a collision here pass 3 will double-check this work.
             checksum._cache[list(partition)[0]] = os.urandom(32)
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
 
@@ -174,29 +177,36 @@ def dupes(*dirs, followlinks=False):
     # pass 3: partition by diff
     # this could be optional; even md5 is safe against accidental collisions and sha256 certainly is;
     # it's only if you don't trust your storage that you really need this.
-    """
     _partitions = {}
     for K,partition in partitions.items():
-        # we need to.... go over pairs in partition x partition
-        partition = list(partition)
+        # this is trickier because we don't have anything to key on
+        # we just have to compare files pairwise and see what's what
+        # we can do a littttle bit better than that though
+
+        # this loop is awkward; I *want* to loop over a set, *shrinking* it as I go
+        # but that's illegal in python. so instead I use a : continue
+        # maybe it would be better to simply write it with indecies?
         subpartitions = []
-        for i,p in enumerate(partition):
-            subpartitions.append({p})
+        _partition = list(partition)
+        for i,p in enumerate(_partition):
+            if p not in partition: continue # skip if already decided
+            subpartitions.append(set())
+
+            subpartitions[-1].add(p)
             partition.remove(p)
-            for j,p2 in enumerate(partition[i+1:]):
-                if not diff(p,p2):
-                    # hmmm will this do redundant work?
+            for j,p2 in enumerate(_partition[i+1:]):
+                if p2 not in partition: continue
+                if not diff(p,p2): # hmmm will this do redundant work? will it re-diff things we've already diffed?
                     subpartitions[-1].add(p2)
-                    partition.remove(p) # ???
+                    partition.remove(p2) # ???
                     # and scratch p and p2 off the list
-        
-        for i,S in enumerate(subpartitions)
-            _partitions.setdefault(K + (i,), set())
-            _partitions[K + (i,)].add(f)
+        assert not partition, "Partition must be empty, but instead was {p}"
+
+        for i,S in enumerate(subpartitions):
+            _partitions[K + (i,)] = S
 
     partitions = _partitions # forget the previous level
     partitions = {k: v for k,v in partitions.items() if len(v) > 1} # forget non-dupes
-    """
 
     # at this point, each partitions[size, checksum, i] are sets of paths, of 'equivalence classes'
     # members of those sets are paths with identical content
