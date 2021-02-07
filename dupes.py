@@ -127,7 +127,7 @@ checksum._cache = {} # cache of checksums; I know I could use @functools.lru_cac
 def diff(p1, p2):
     "return True if paths p1 and p2 differ, false otherwise"
 
-    print(['diff','-r',p1,p2]) # TODO: logging.info()
+    #print(['diff','-r',p1,p2]) # TODO: logging.info()
     # ..wait
     r = subprocess.run(['diff','-r',p1,p2], stdout=subprocess.DEVNULL).returncode
     if r == 0:
@@ -139,6 +139,24 @@ def diff(p1, p2):
         raise Exception('diff failed')        
 
     #TODO: fallback to internal diff if diff isn't available
+
+def _internal_diff(p1, p2):
+
+    # this seems to be about 30% faster than shelling out to diff
+    if os.path.isdir(p1) and os.path.isdir(p2):
+        return False # because probably
+
+    CHUNK_SIZE = 8129
+    with open(p1,'rb') as fd1, open(p2,'rb') as fd2:
+        while True:
+            r1 = fd1.read(CHUNK_SIZE)
+            r2 = fd2.read(CHUNK_SIZE)
+            if r1 != r2:
+                return False
+            if not r2: break
+        return True
+
+diff = _internal_diff
 
 def dupes(*dirs, followlinks=False):
     """
