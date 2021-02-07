@@ -26,6 +26,16 @@ import os
 import sys
 import hashlib
 
+
+def isancestor(p1, p2):
+    "return if p1 is an ancestor path of p2"
+    # XXX maybe this will be confused by "./././" in the path?
+    p1 = os.path.normpath(p1)
+    p2 = os.path.normpath(p2)
+    if p1 == p2: return False # *strict* ancestry
+    return os.path.commonpath([p1, p2]) == p1
+    
+
 def checksum(p, hash=hashlib.sha256):
     # TODO: should the checksum include the filesize?
     if p not in checksum._cache:
@@ -86,30 +96,47 @@ def dupes(*dirs, followlinks=False):
     D = {} # contains sets of duplicates, each such that f in D[checksum(f)] for all f, and each f is *only in one* set
     for dir in dirs:
         # TODO: handle onerror=?
+        if not os.path.isdir(dir):
+            raise ValueError(f'{dir} is not a directory') # XXX??? why doesn't os.walk() error on this?
         for (path, dirs, files) in os.walk(dir, topdown=False, followlinks=followlinks):
             for p in [os.path.join(path, e) for e in files] + [path]:
                 #print("Walking:", p) # DEBUG
                 #if os.path.isdir(p): continue # DEBUG: make this like fdupes
                 if os.path.islink(p): continue # make this like fdupes, which silently ignores symlinks (as symlinks)
                 if checksum(p) not in D:
-                    D[checksum(p)] = [] #set()
-                D[checksum(p)].append(p)
+                    D[checksum(p)] = set()
+                D[checksum(p)].add(p)
 
     #print(D)
-    #print(len(D))
+    print("A", len(D))
     # uhhh now I need to invert the dataset?
     # in fact we can throw away the keys here
-    D = list(D.values())
-    #print(len(D))
+    D = {frozenset(S) for S in D.values()}
+    #D = list(D.values())
+    print("B", len(D))
 
+    # filter out non-dupes
+    D = {S for S in D if len(S) > 1}
+    print("C", len(D))
 
-    # now maybe make an index? uh.. hm
+    # make an index by path
+    I = {}
+    for S in D:
+        for p in S:
+            I[p] = S
+    print("D len(I)=", len(I))
 
-
-    # now, filter out *children*
-    # if the parent of a file is in
-    # or is it any parent
-    # 
+    # now: filter out children.
+    # to do this efficiently I should reshape the dataset with an index first, probably
+    # should I loop over parents and remove their children or loop over children and remove their parents?
+    #
+    # this is also sort of weird because I'm look at paths but removing entire sets? Is that going to work?
+    print(len(D))
+    print(len(I))
+    #breakpoint()
+    D = {I[p] for p in I if not any(isancestor(P, p) for P in I)} # <__ VERY SLOW
+    print(D)
+    print(len(D))
 
     # okay now go through the sets in D and split them up further
     # TODO:
@@ -127,18 +154,13 @@ def dupes(*dirs, followlinks=False):
     # you could do the same but with S == all files, but it would be slower because you'd be byte-for-byte comparing 
     # except... in the case where you mostly only have two dupes of everything
 
-    #
-
-    # ...is gthat...it?
-
     #print("dupes:")
+    D = sorted([sorted(S) for S in D]) # ugh
     for S in D:
-        if len(S) > 1:
-            for f in S:
-                if os.path.isdir(f) and not f.endswith("/"): f+="/"
-                print(f)
-
-            print()
+        for f in S:
+            if os.path.isdir(f) and not f.endswith("/"): f+="/"
+            print(f)
+        print()
 
 
 if __name__ == '__main__':
